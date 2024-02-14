@@ -15,3 +15,5 @@ The mail example:
 ![image](https://github.com/romchhh/email-spammer/assets/123520267/21f76ff8-d8d3-468b-ba94-6e0fd7c3a194)
 ![image](https://github.com/romchhh/email-spammer/assets/123520267/c1207661-fafd-4110-8977-66c3f9dfce9d)
 
+
+enjoy and use only with beneficial intentions:)
