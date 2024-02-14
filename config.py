@@ -1,2 +1,2 @@
-email = 'fedoniukroman@gmail.com'
-key="bfezwqblfmuxtjdj"
+email = ''
+key=""
