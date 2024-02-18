@@ -1,32 +1,19 @@
-from itertools import cycle
 import sys
-import time
 import pandas as pd
 import logging
-from PyQt5.QtWidgets import (
-    QApplication, QWidget, QLabel, QLineEdit, QPushButton, QFileDialog,
-    QVBoxLayout, QTextEdit, QHBoxLayout, QMessageBox, QDialog, QTextBrowser,
-    QSizePolicy, QListWidget
+from typing import Dict
+from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QFileDialog, QVBoxLayout, QTextEdit, QHBoxLayout, 
+                             QMessageBox, QDialog, QListWidget, QListWidget, QListWidgetItem, QHBoxLayout, QPushButton
 )
-from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QTextBrowser, QLabel, QTextEdit, QListWidget, QListWidgetItem, QHBoxLayout, QSizePolicy, QPushButton, QFrame
-)
-from PyQt5.QtGui import QPixmap, QImageReader
 from PyQt5.QtCore import QSize
-from PyQt5.QtGui import QIcon
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.image import MIMEImage
-from email.mime.base import MIMEBase
-from email import encoders
-import smtplib
+from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QFile, QTextStream
+from PyQt5.QtWebEngineWidgets import QWebEngineView
+from accounts_serializer import get_accounts
+from email_thread import EmailSenderThread, Signal
 from PyQt5.QtCore import Qt
 from info import html_guide
-import datetime
-from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from accounts_serializer import Account, get_accounts
-from collections import defaultdict
 
 
 class UTF8LogFormatter(logging.Formatter):
@@ -39,72 +26,23 @@ logging.getLogger().handlers[0].setFormatter(UTF8LogFormatter())
 
 MIN_MESSAGE_HEIGHT = 200
 MIN_DIALOG_SIZE = (800, 600)
-
-
-def send_email(receiver_email, subject, message, attachments, account: Account):
-        try:
-            server = smtplib.SMTP("smtp.gmail.com", 587)
-            server.starttls()
-            server.login(account.mail, account.key)
-
-            msg = MIMEMultipart()
-            msg['From'] = account.mail
-            msg['To'] = receiver_email
-            msg['Subject'] = subject
-
-
-            for attachment in attachments:
-                if attachment.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', 'txt', )):
-                    with open(attachment, 'rb') as file:
-                        img = MIMEImage(file.read(), name=f"image_{attachments.index(attachment)}.png")
-                        msg.attach(img)
-                elif attachment.lower().endswith(('.html')) :
-                    with open(attachment, 'rb') as file:
-                        html_content = file.read().decode('utf-8')
-                        msg.attach(MIMEText(html_content, 'html'))
-                else:
-                    with open(attachment, 'rb') as file:
-                        part = MIMEBase('application', 'octet-stream')
-                        part.set_payload(file.read())
-                        encoders.encode_base64(part)
-                        part.add_header('Content-Disposition', f"attachment; filename={attachment}")
-                        msg.attach(part)
-
-            text = msg.as_string()
-
-            server.sendmail(account.mail, receiver_email, text)
-            print(f"Email sent successfully to {receiver_email}")
-
-            logging.info(f"Email sent from {account.mail} to: {receiver_email}, Subject: {subject}, Message: {message}, Timestamp: {datetime.now()}")
-
-            server.quit()
-
-        except Exception as e:
-            print(f"Error: {e}")
+EMAIL_SEND_LIMIT = 5
 
 class EmailSenderWindow(QWidget):
     def __init__(self):
         super().__init__()
-
+        self.thread: Dict[EmailSenderThread] = {}
         self.init_ui()
 
     def init_ui(self):
         self.setGeometry(100, 100, 1350, 900)
         self.setWindowTitle('Програма для розсилки')
 
-        self.setStyleSheet(
-            "QWidget { background-color: #f5f5f5; color: #333; font-family: 'Segoe UI', sans-serif; }"
-            "QLabel { font-weight: bold; font-size: 16px; color: #333; }"
-            "QLineEdit, QTextEdit { background-color: #fff; border: 2px solid #aaa; padding: 8px; font-size: 18px; "
-            "border-radius: 5px; color: #333; }"
-            "QPushButton { background-color: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 5px; "
-            "font-size: 16px; }"
-            "QPushButton:hover { background-color: #2980b9; }"
-            "QDialog { background-color: #f5f5f5; color: #333; font-family: 'Segoe UI', sans-serif; }"
-            "QTextEdit { background-color: #fff; border: 2px solid #aaa; padding: 8px; font-size: 18px; border-radius: 5px; "
-            "color: #333; }"
-            "QFileDialog { background-color: #fff; }"
-        )
+        style_file = QFile("styles/design.qss")
+        style_file.open(QFile.ReadOnly | QFile.Text)
+        stream = QTextStream(style_file)
+        self.setStyleSheet(stream.readAll())
+        style_file.close()
 
 
         self.download_button = QPushButton('Виберіть файл Excel', self)
@@ -132,7 +70,7 @@ class EmailSenderWindow(QWidget):
 
         self.send_button = QPushButton('Надіслати листи', self)
         self.send_button.setToolTip('Натисніть, щоб надіслати електронні листи вибраним одержувачам.')
-        self.send_button.clicked.connect(self.send_emails)
+        self.send_button.clicked.connect(self.start_email_thread)
 
         self.html_guide_button = QPushButton('?', self)
         self.html_guide_button.setToolTip('Натисніть, щоб переглянути вказівки.')
@@ -173,6 +111,20 @@ class EmailSenderWindow(QWidget):
         layout.addWidget(self.sent_label, alignment=Qt.AlignLeft)
 
         self.setLayout(layout)
+        
+        self.print_log = QTextEdit(self)
+        self.print_log.setReadOnly(True)
+        self.print_log.setMinimumHeight(100)
+        self.print_log.setStyleSheet("background-color: #fff; border: 2px solid #aaa; padding: 8px; font-size: 16px; border-radius: 5px;")
+
+        layout.addWidget(self.print_log)
+        
+        
+
+    def print_to_log(self, message):
+        current_text = self.print_log.toPlainText()
+        self.print_log.setPlainText(current_text + message + '\n')
+        self.print_log.verticalScrollBar().setValue(self.print_log.verticalScrollBar().maximum())
 
     def choose_excel_file(self):
         file_path, _ = QFileDialog.getOpenFileName(None, 'Виберіть файл Excel', '', 'Excel Files (*.xlsx)')
@@ -200,57 +152,40 @@ class EmailSenderWindow(QWidget):
                 QMessageBox.critical(self, 'Error', f'Error loading accounts file: {str(e)}')
                 self.status_label.setText('Error loading accounts file.')
 
-    def send_emails(self):
+    def start_email_thread(self):
         if hasattr(self, 'df'):
             receiver_emails = self.df.iloc[:, 0].tolist()
             subject = self.subject_input.text()
             message = self.message_input.toPlainText()
-
-            if not (receiver_emails):
+            
+            if not (receiver_emails and subject and message):
                 self.status_label.setText('Будь ласка, заповніть усі поля.')
+
             else:
                 try:
-                    start_time = datetime.now()
 
-                    account_request_counts = defaultdict(int)
+                    self.thread['email'] = EmailSenderThread(receiver_emails, subject, message, self.accounts, self.attachments)
+                    self.thread['email'].start()
+                    self.thread['email'].update_log.connect(self.send_emails)
 
-                    with ThreadPoolExecutor(max_workers=len(self.accounts)) as executor:
-                        account_cycle = cycle(self.accounts)
-                        futures = []
-
-                        for receiver_email in receiver_emails:
-                            account = next(account_cycle)
-                            
-                            if account_request_counts[account] < 500:
-                                future = executor.submit(
-                                    send_email,
-                                    receiver_email,
-                                    subject,
-                                    message,
-                                    self.attachments,
-                                    account
-                                )
-                                futures.append(future)
-                                account_request_counts[account] += 1  
-
-                    
-                    for future in as_completed(futures):
-                        future.result()
-
-                    print(f'Total sended {sum(account_request_counts.values())} mails ')
-
-
-                    end_time = datetime.now()
-                    time_taken = end_time - start_time
-                    print(f"Time taken: {time_taken}")
-
-                    self.status_label.setText('Листи успішно надіслано.')
-                    self.sent_label.setText(f'Надіслані листи: {len(receiver_emails)}')
                 except Exception as e:
                     QMessageBox.critical(self, 'Error', f'Error sending emails: {str(e)}')
                     self.status_label.setText('Помилка надсилання електронних листів.')
         else:
             self.status_label.setText('Спочатку виберіть файл Excel.')
+
+    def send_emails(self, signal: Signal):
+        try:
+            
+            self.print_to_log(signal.log)
+
+            print(signal.sent_label)
+            # self.sent_label.setText(signal.sent_label)
+            self.status_label.setText(signal.sent_label)            
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Error sending emails: {str(e)}')
+            self.status_label.setText('Помилка надсилання електронних листів.')
+
 
     def review_emails(self):
         subject = self.subject_input.text()
@@ -290,22 +225,17 @@ class EmailReviewDialog(QDialog):
         super().__init__()
 
         self.setWindowTitle('Перегляд листа')
-        self.setGeometry(200, 200, 600, 500)
+        self.setGeometry(200, 200, 800, 600)
 
-        self.setStyleSheet(
-            "QDialog { background-color: #f8f8f8; border: 1px solid #ccc; }"
-            "QWidget { background-color: #f8f8f8; color: #333; font-family: 'Segoe UI', sans-serif; }"
-            "QTextEdit { background-color: #fff; border: 2px solid #ccc; padding: 8px; font-size: 12px; "
-            "border-radius: 5px; }"
-            "QLabel { font-weight: bold; color: #555; }"
-            "QListWidget { border: 2px solid #ccc; padding: 8px; font-size: 12px; border-radius: 5px; }"
-            "QListWidget::item { padding: 4px; }"
-            "QPushButton { background-color: #4CAF50; color: white; border: none; padding: 8px 12px; "
-            "text-align: center; text-decoration: none; display: inline-block; font-size: 12px; "
-            "margin: 4px 2px; cursor: pointer; border-radius: 4px; }"
-        )
+        style_file = QFile("styles/design_preview.qss")
+        style_file.open(QFile.ReadOnly | QFile.Text)
+        stream = QTextStream(style_file)
+        stylesheet = stream.readAll()
+        style_file.close()
 
-        self.review_text = QTextBrowser(self)
+        # Apply the stylesheet
+        self.setStyleSheet(stylesheet)
+
         self.subject_label = QLabel(f"<font color='#007acc'>Subject:</font> {subject}")
         self.message_text = QTextEdit(message)
         self.message_text.setReadOnly(True)
@@ -314,16 +244,15 @@ class EmailReviewDialog(QDialog):
         self.attachment_list = QListWidget()
         self.attachment_list.setSelectionMode(QListWidget.SingleSelection)
         self.attachment_list.setViewMode(QListWidget.IconMode)
-        self.attachment_list.setIconSize(QSize(100, 100))  # Set the desired icon size
+        self.attachment_list.setIconSize(QSize(100, 100))
 
         if attachments:
             for attachment in attachments:
-                if attachment.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
-                    item = QListWidgetItem(QIcon(attachment), attachment)
-                    item.setData(Qt.UserRole, attachment)
-                    self.attachment_list.addItem(item)
+                item = QListWidgetItem(attachment)
+                item.setData(Qt.UserRole, attachment)
+                self.attachment_list.addItem(item)
 
-        self.attachment_list.itemSelectionChanged.connect(self.show_selected_image)
+        self.attachment_list.itemSelectionChanged.connect(self.show_selected_attachment)
 
         layout = QVBoxLayout()
         layout.addWidget(self.subject_label)
@@ -331,12 +260,8 @@ class EmailReviewDialog(QDialog):
         layout.addWidget(self.attachment_label)
         layout.addWidget(self.attachment_list)
 
-        self.image_viewer = QLabel()
-        self.image_viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.image_viewer.setAlignment(Qt.AlignCenter)
-        self.image_viewer.setScaledContents(True)
-
-        layout.addWidget(self.image_viewer)
+        self.attachment_content_viewer = QWebEngineView()
+        layout.addWidget(self.attachment_content_viewer)
 
         button_layout = QHBoxLayout()
         close_button = QPushButton("Close")
@@ -346,13 +271,17 @@ class EmailReviewDialog(QDialog):
 
         self.setLayout(layout)
 
-    def show_selected_image(self):
+    def show_selected_attachment(self):
         selected_item = self.attachment_list.currentItem()
         if selected_item:
             file_path = selected_item.data(Qt.UserRole)
-            pixmap = QPixmap(file_path)
-            self.image_viewer.setPixmap(pixmap)
-            self.image_viewer.setHidden(False)
+            if file_path.lower().endswith(('.html', '.htm')):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    html_content = f.read()
+                self.attachment_content_viewer.setHtml(html_content)
+            else:
+                # Clear the viewer if the selected attachment is not HTML
+                self.attachment_content_viewer.setHtml('')
 
 
 if __name__ == '__main__':
