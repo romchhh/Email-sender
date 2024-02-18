@@ -4,7 +4,8 @@ This python script just emails the mails from excel file. In this script is user
 
 
 The main window:
-![image](https://github.com/romchhh/email-spammer/assets/123520267/6628450f-a5e9-4dd3-9d67-63abf3d649ea)
+![image](https://github.com/romchhh/Email-sender/assets/123520267/9040d9b4-d5a6-4259-91a7-da838aa69862)
+
 
 The mail example:
 
